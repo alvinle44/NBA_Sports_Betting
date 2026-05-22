@@ -10,11 +10,11 @@ import json             # Read/write JSON files
 from pathlib import Path  # Cross-platform file paths
 from scripts.config import Config
 # Machine Learning Libraries
-from xgboost import XGBRegressor  # Gradient boosted trees (our ML algorithm)
-from sklearn.model_selection import TimeSeriesSplit  # Time-series cross-validation
-from sklearn.metrics import mean_absolute_error, mean_squared_error  # Evaluate model
-from sklearn.preprocessing import StandardScaler  # Normalize features
-from scipy.stats import norm  # Calculate probabilities from predictions
+# from xgboost import XGBRegressor  # Gradient boosted trees (our ML algorithm)
+# from sklearn.model_selection import TimeSeriesSplit  # Time-series cross-validation
+# from sklearn.metrics import mean_absolute_error, mean_squared_error  # Evaluate model
+# from sklearn.preprocessing import StandardScaler  # Normalize features
+# from scipy.stats import norm  # Calculate probabilities from predictions
 
 # Web Scraping
 try:
@@ -293,7 +293,7 @@ class HistoricalOddsScraper:
         
         return dates
     
-    def scrape_date_range(self, start_date, end_date, max_quota=199500):
+    def scrape_date_range(self, start_date, end_date, max_quota=999950):
         """
         Main scraping function with automatic duplicate prevention.
         NOW WITH INCREMENTAL SAVING AND QUOTA PROTECTION!
@@ -505,3 +505,12 @@ class HistoricalOddsScraper:
         else:
             print("\n⚠️  No new data collected")
             return pd.DataFrame()
+
+if __name__ == "__main__":
+    collector = HistoricalOddsScraper(Config.ODDS_API_KEY)
+
+    collector.scrape_date_range(
+        start_date="2025-12-20T00:00:00Z",
+        end_date="2026-04-12T23:59:59Z",
+        max_quota=999950
+    )

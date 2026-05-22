@@ -7,6 +7,7 @@ import time             # Add delays for rate limiting
 import warnings         # Suppress unnecessary warnings
 import json             # Read/write JSON files
 from scripts.config import Config
+from scripts.rapidapi_injury_scrapper import RapidAPIInjuryScraper
 # Web Scraping
 try:
     from bs4 import BeautifulSoup  # Parse HTML for injury scraping
@@ -53,8 +54,9 @@ class NBAResultsScraper:
         self.team_stats_cache = {}    # team defensive stats
         self.injury_cache = {}        # current injuries
         self.player_stats_cache = {}  # player game logs
+        self.injury_scraper = RapidAPIInjuryScraper()  # NEW!
     
-    def load_cached_player_stats(self, season="2024-25"):
+    def load_cached_player_stats(self, season="2025-26"):
         """
         Load player stats from disk cache if less than 24 hours old.
         
@@ -78,7 +80,7 @@ class NBAResultsScraper:
                     pass
         return False
     
-    def save_player_stats_cache(self, season="2024-25"):
+    def save_player_stats_cache(self, season="2025-26"):
         """Save player stats cache to disk for next run."""
         cache_file = Config.DATA_DIR / f'player_stats_cache_{season}.pkl'
         with open(cache_file, 'wb') as f:
@@ -221,93 +223,117 @@ class NBAResultsScraper:
             }
             return manual_map.get(player_name, 'SF')
     
-    def get_player_game_stats(self, player_name, season="2024-25"):
+    def get_player_game_stats(self, player_name, season='2025-26', max_retries=3):
         """
-        Get player's game-by-game statistics for a season.
-        
-        Returns DataFrame with columns like:
-        - GAME_DATE: When game was played
-        - PTS, AST, REB: Stats from that game
-        - MIN: Minutes played
-        - Plus many more stats
-        
-        Uses cache to avoid redundant API calls.
-        """
-        # Check cache first
-        cache_key = f"{player_name}_{season}"
-        if cache_key in self.player_stats_cache:
-            return self.player_stats_cache[cache_key]
-        
-        player_id = self.get_player_id(player_name)
-        if not player_id:
-            return pd.DataFrame()
-        
-        try:
-            # Fetch from NBA API
-            gamelog = playergamelog.PlayerGameLog(
-                player_id=player_id,
-                season=season
-            )
-            df = gamelog.get_data_frames()[0]
-            df['player_name'] = player_name
-            
-            # Cache it for next time
-            self.player_stats_cache[cache_key] = df
-            
-            time.sleep(0.6)  # Rate limit - NBA API allows ~100/minute
-            return df
-        except Exception as e:
-            print(f"Error fetching {player_name}: {e}")
-            return pd.DataFrame()
-    
-    def get_team_defensive_stats(self, team_name, season="2024-25", last_n_games=10):
-        """
-        Get team's defensive statistics - BOTH season-long AND recent.
-        
-        This is KEY for accurate predictions! Returns:
-        1. Season-long stats (stable baseline)
-        2. Recent 10 games stats (current form)
-        3. Weighted average (70% recent, 30% season)
-        4. Defensive trend (improving or declining?)
-        
-        Why both?
-        - Season = reliable but may be outdated
-        - Recent = current form but can be noisy
-        - Weighted = best of both worlds
+        Fetch player game stats with retry logic and longer timeout.
         
         Args:
-            team_name: NBA team name
-            season: Season year
-            last_n_games: How many recent games to analyze (default 10)
+            player_name: Player's full name
+            season: NBA season (e.g., '2024-25')
+            max_retries: Number of retry attempts on timeout
         
         Returns:
-            Dict with 10+ defensive metrics
+            DataFrame with player's game stats
+        """
+        import time
+        NAME_FIXES = {
+        'Isaiah Stewart II': 'Isaiah Stewart',
+        'Moe Wagner': 'Moritz Wagner',
+        'K.J. Martin': 'KJ Martin',
+        'Nicolas Claxton': 'Nic Claxton',
+        'Herb Jones': 'Herbert Jones',
+        'C.J. McCollum': 'CJ McCollum',
+        'R.J. Barrett': 'RJ Barrett',
+        'B.J. Boston Jr': 'BJ Boston',
+        'A.J. Green': 'AJ Green',
+        'Paul Reed Jr': 'Paul Reed',
+        'Bruce Brown Jr': 'Bruce Brown',
+        'G.G. Jackson': 'GG Jackson',
+        'Kenyon Martin Jr.': 'Kenyon Martin Jr',
+        'Xavier Tillman, Sr.': 'Xavier Tillman',
+        'Carlton Carrington': 'Bub Carrington',
+        'Mohamed Bamba':'Mo Bamba',
+        'James Huff':'Jay Huff'
+
+        # Add more as you find them
+        }
+        if player_name in NAME_FIXES:
+            print(f"    🔧 Name fix: {player_name} → {NAME_FIXES[player_name]}")
+            player_name = NAME_FIXES[player_name]
+            
+        for attempt in range(max_retries):
+            try:
+                # Add delay to avoid rate limiting
+                if attempt > 0:
+                    wait_time = attempt * 15  # 15s, 30s, 45s
+                    print(f"    ⏱️  Retry {attempt + 1}/{max_retries} for {player_name} in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    # Small delay between all requests
+                    time.sleep(0.6)
+                
+                # Get player ID
+                from nba_api.stats.static import players
+                player_dict = players.find_players_by_full_name(player_name)
+                
+                if not player_dict:
+                    if attempt == 0:  # Only print once
+                        print(f"    ⚠️  Player not found: {player_name}")
+                    return pd.DataFrame()
+                
+                player_id = player_dict[0]['id']
+                
+                # Fetch game log with LONGER TIMEOUT
+                from nba_api.stats.endpoints import playergamelog
+                
+                gamelog = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    timeout=90  # Increased from 30 to 90 seconds
+                )
+                
+                df = gamelog.get_data_frames()[0]
+                
+                if not df.empty:
+                    # Success!
+                    if attempt > 0:
+                        print(f"    ✓ Successfully fetched {player_name} on attempt {attempt + 1}")
+                    return df
+                
+                return pd.DataFrame()
+                
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    print(f"    ⏱️  Timeout for {player_name} (attempt {attempt + 1}/{max_retries})")
+                    continue  # Try again
+                else:
+                    print(f"    ❌ Failed to fetch {player_name} after {max_retries} attempts (timeout)")
+                    return pd.DataFrame()
+            
+            except Exception as e:
+                if attempt == 0:  # Only print once
+                    print(f"    ❌ Error fetching {player_name}: {str(e)[:100]}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
+                    continue
+                return pd.DataFrame()
+        
+        return pd.DataFrame()
+    
+    def get_team_defensive_stats(self, team_name, season="2025-26", last_n_games=10, as_of_date=None):
+        """
+        Get team's defensive statistics with as_of_date support.
+        
+        ✅ FIXED: Uses correct NBA API columns
         """
         team_id = self.get_team_id(team_name)
         if not team_id:
             return None
         
         try:
-            # ===== GET SEASON-LONG STATS =====
-            team_stats = leaguedashteamstats.LeagueDashTeamStats(
-                season=season,
-                per_mode_detailed="PerGame",
-                measure_type_detailed_defense="Defense"
-            )
+            # Get team game logs
+            from nba_api.stats.endpoints import teamgamelogs
             
-            df = team_stats.get_data_frames()[0]
-            team_row = df[df['TEAM_ID'] == team_id]
-            
-            if team_row.empty:
-                return None
-            
-            season_stats = {
-                'def_rating_season': team_row['DEF_RATING'].values[0],
-                'opp_pts_per_game_season': team_row['OPP_PTS'].values[0] if 'OPP_PTS' in team_row else 0,
-                'pace_season': team_row['PACE'].values[0] if 'PACE' in team_row else 100,
-            }
-            
-            # ===== GET RECENT STATS (Last N Games) =====
             game_logs = teamgamelogs.TeamGameLogs(
                 season_nullable=season,
                 team_id_nullable=team_id,
@@ -316,86 +342,168 @@ class NBAResultsScraper:
             
             games_df = game_logs.get_data_frames()[0]
             
-            if not games_df.empty and len(games_df) >= last_n_games:
-                recent_games = games_df.head(last_n_games)
+            if games_df.empty:
+                return None
+            
+            # ✅ Filter to games BEFORE as_of_date
+            if as_of_date:
+                games_df['GAME_DATE'] = pd.to_datetime(games_df['GAME_DATE'])
+                as_of_date_dt = pd.to_datetime(as_of_date)
+                games_df = games_df[games_df['GAME_DATE'] < as_of_date_dt]
                 
-                # Calculate recent defensive performance
-                recent_stats = {
-                    'opp_pts_last_10': recent_games['OPP_PTS'].mean() if 'OPP_PTS' in recent_games else 0,
-                    'opp_fg_pct_last_10': recent_games['OPP_FG_PCT'].mean() if 'OPP_FG_PCT' in recent_games else 0.45,
-                    'opp_fg3_pct_last_10': recent_games['OPP_FG3_PCT'].mean() if 'OPP_FG3_PCT' in recent_games else 0.35,
-                    
-                    # DEFENSIVE TREND: Are they improving or declining?
-                    # Compare last 5 games to previous 5 games
-                    'def_trend': (
+                if games_df.empty:
+                    return None
+            
+            # Sort by date (most recent first)
+            games_df = games_df.sort_values('GAME_DATE', ascending=False)
+            
+            # ✅ FIX: Calculate opponent points from game logs
+            # PTS_DIFF = Team points - Opponent points
+            # So: Opponent points = Team points - PTS_DIFF
+            
+            if 'PTS' in games_df.columns and 'PLUS_MINUS' in games_df.columns:
+                # opponent_pts = team_pts - plus_minus
+                games_df['OPP_PTS'] = games_df['PTS'] - games_df['PLUS_MINUS']
+            elif 'PTS' in games_df.columns and 'W_PCT' in games_df.columns:
+                # Estimate opponent points (rough approximation)
+                games_df['OPP_PTS'] = games_df['PTS'] * 0.95  # Placeholder
+            else:
+                # Can't calculate, use defaults
+                return {
+                    'def_rating_weighted': 110.0,
+                    'def_rating_season': 110.0,
+                    'def_rating_last_10': 110.0,
+                    'pace': 100.0,
+                    'pace_season': 100.0,
+                    'opp_pts_weighted': 110.0,
+                    'opp_pts_per_game_season': 110.0,
+                    'opp_pts_last_10': 110.0,
+                    'games_used': len(games_df),
+                    'recent_games_used': min(len(games_df), last_n_games)
+                }
+            
+            # Calculate season averages
+            season_opp_pts = games_df['OPP_PTS'].mean()
+            
+            # Calculate recent averages (last N games)
+            if len(games_df) >= last_n_games:
+                recent_games = games_df.head(last_n_games)
+                recent_opp_pts = recent_games['OPP_PTS'].mean()
+                
+                # Defensive trend (negative = improving)
+                if len(recent_games) >= 10:
+                    def_trend = (
                         recent_games.head(5)['OPP_PTS'].mean() - 
                         recent_games.tail(5)['OPP_PTS'].mean()
-                    ) if len(recent_games) >= 10 else 0,
-                    # Negative trend = improving (allowing fewer points)
-                    # Positive trend = declining (allowing more points)
-                }
-                
-                # Calculate recent defensive rating estimate
-                if 'POSS' in recent_games.columns:
-                    recent_stats['def_rating_last_10'] = (
-                        recent_games['OPP_PTS'].sum() / 
-                        recent_games['POSS'].sum() * 100
                     )
                 else:
-                    # Estimate if possessions not available
-                    pace = season_stats['pace_season']
-                    recent_stats['def_rating_last_10'] = (
-                        recent_stats['opp_pts_last_10'] / pace * 100
-                    )
+                    def_trend = 0
             else:
-                # Not enough recent games, use season stats
-                recent_stats = {
-                    'opp_pts_last_10': season_stats['opp_pts_per_game_season'],
-                    'opp_fg_pct_last_10': 0.45,
-                    'opp_fg3_pct_last_10': 0.35,
-                    'def_rating_last_10': season_stats['def_rating_season'],
-                    'def_trend': 0,
-                }
+                recent_opp_pts = season_opp_pts
+                def_trend = 0
             
-            # ===== COMBINE & CALCULATE WEIGHTED =====
-            stats = {**season_stats, **recent_stats}
+            # Estimate defensive rating (points per 100 possessions)
+            # Simple estimate: (opp_pts / 100) * 100 = opp_pts as rating
+            def_rating_season = season_opp_pts
+            def_rating_recent = recent_opp_pts
             
-            # WEIGHTED AVERAGE (70% recent, 30% season)
-            # This is the PRIMARY stat used for predictions!
-            stats['def_rating_weighted'] = (
-                0.7 * stats['def_rating_last_10'] + 
-                0.3 * stats['def_rating_season']
-            )
+            # Weighted average (70% recent, 30% season)
+            def_rating_weighted = (0.7 * def_rating_recent) + (0.3 * def_rating_season)
+            opp_pts_weighted = (0.7 * recent_opp_pts) + (0.3 * season_opp_pts)
             
-            stats['opp_pts_weighted'] = (
-                0.7 * stats['opp_pts_last_10'] + 
-                0.3 * stats['opp_pts_per_game_season']
-            )
+            # Estimate pace (possessions per game)
+            # Average NBA pace is ~100
+            if 'FGA' in games_df.columns and 'FTA' in games_df.columns:
+                # Pace estimate: FGA + 0.44 * FTA + TOV
+                pace = 100.0  # Simplified for now
+            else:
+                pace = 100.0
             
-            # ===== POSITION-SPECIFIC DEFENSE =====
-            # How well they defend guards vs forwards vs centers
-            try:
-                from nba_api.stats.endpoints import teamdashptshot
-                position_def = teamdashptshot.TeamDashPtShot(
-                    team_id=team_id,
-                    season=season
-                )
-                pos_df = position_def.get_data_frames()[0]
-                
-                stats['def_vs_guards'] = pos_df[pos_df['PLAYER_POSITION'].str.contains('Guard', na=False)]['FG_PCT'].mean() if not pos_df.empty else 0.45
-                stats['def_vs_forwards'] = pos_df[pos_df['PLAYER_POSITION'].str.contains('Forward', na=False)]['FG_PCT'].mean() if not pos_df.empty else 0.47
-                stats['def_vs_centers'] = pos_df[pos_df['PLAYER_POSITION'].str.contains('Center', na=False)]['FG_PCT'].mean() if not pos_df.empty else 0.50
-            except:
-                # Fallback values if endpoint fails
-                stats['def_vs_guards'] = 0.45
-                stats['def_vs_forwards'] = 0.47
-                stats['def_vs_centers'] = 0.50
+            stats = {
+                'def_rating_weighted': def_rating_weighted,
+                'def_rating_season': def_rating_season,
+                'def_rating_last_10': def_rating_recent,
+                'pace': pace,
+                'pace_season': pace,
+                'opp_pts_weighted': opp_pts_weighted,
+                'opp_pts_per_game_season': season_opp_pts,
+                'opp_pts_last_10': recent_opp_pts,
+                'def_trend': def_trend,
+                'games_used': len(games_df),
+                'recent_games_used': min(len(games_df), last_n_games)
+            }
+            
+            if as_of_date:
+                stats['as_of_date'] = str(as_of_date)
             
             return stats
             
         except Exception as e:
             print(f"Error fetching defensive stats for {team_name}: {e}")
             return None
+    
+
+    def get_player_stats_before_date(self, player_name, target_date, season='2025-26', last_n_games=10):
+        """
+        Get player's stats from games BEFORE a specific date.
+        
+        ✅ Ensures no data leakage - only uses prior games!
+        
+        Args:
+            player_name: Player's full name
+            target_date: Date to filter before (e.g., '2025-11-18')
+            season: NBA season
+            last_n_games: How many recent games to include
+        
+        Returns:
+            Dict with player stats calculated from games BEFORE target_date
+        
+        Example:
+            # For LeBron's Nov 18 game, get his stats from before Nov 18:
+            stats = get_player_stats_before_date(
+                player_name='LeBron James',
+                target_date='2025-11-18',  # ✅ Only uses games before Nov 18
+                season='2025-26',
+                last_n_games=10
+            )
+        """
+        # Get all game logs for the season
+        all_games = self.get_player_game_stats(player_name, season)
+        
+        if all_games.empty:
+            return None
+        
+        # Convert dates
+        all_games['GAME_DATE'] = pd.to_datetime(all_games['GAME_DATE'])
+        target_date_dt = pd.to_datetime(target_date)
+        
+        # ✅ Filter to games BEFORE target date
+        prior_games = all_games[all_games['GAME_DATE'] < target_date_dt]
+        
+        if prior_games.empty:
+            print(f"  ⚠️  No prior games found for {player_name} before {target_date}")
+            return None
+        
+        # Sort by date (most recent first)
+        prior_games = prior_games.sort_values('GAME_DATE', ascending=False)
+        
+        # Take last N games
+        recent_games = prior_games.head(last_n_games)
+        
+        # Calculate stats
+        stats = {
+            'player_name': player_name,
+            'as_of_date': str(target_date),
+            'games_used': len(recent_games),
+            'avg_pts': recent_games['PTS'].mean() if 'PTS' in recent_games else 0,
+            'avg_ast': recent_games['AST'].mean() if 'AST' in recent_games else 0,
+            'avg_reb': recent_games['REB'].mean() if 'REB' in recent_games else 0,
+            'avg_min': recent_games['MIN'].mean() if 'MIN' in recent_games else 0,
+            'last_game_pts': recent_games.iloc[0]['PTS'] if 'PTS' in recent_games else 0,
+            'last_game_date': str(recent_games.iloc[0]['GAME_DATE'].date()),
+        }
+        
+        return stats
     
     def scrape_espn_injuries(self):
         """
@@ -625,50 +733,132 @@ class NBAResultsScraper:
                 'opportunity_score': 1.0
             }
     
-    def get_results_for_date_range(self, start_date, end_date, players_list):
+    def get_results_for_date_range(self, start_date, end_date, players_list, season=None):
         """
-        Fetch actual game results for all players in date range.
-        
-        Used when preparing training data or tracking results.
+        Fetch and save player game results for all players in the date range.
+        Saves each player's data immediately after fetching so progress isn't lost.
+
+        Args:
+            start_date (str): Start date 'YYYY-MM-DD'
+            end_date (str): End date 'YYYY-MM-DD'
+            players_list (list[str]): List of player names
+            season (str): Optional override season (e.g., '2025-26')
+
+        Returns:
+            pd.DataFrame: Combined DataFrame of all player stats.
+        """
+        import time, os, pandas as pd
+        from pathlib import Path
+        from datetime import datetime
+
+        print(f"\n{'='*70}")
+        print(f"Fetching NBA Game Results ({start_date} → {end_date})")
+        print(f"{'='*70}")
+
+        # --- 1️⃣ Determine season if not provided ---
+        if season is None:
+            start = datetime.strptime(start_date[:10], '%Y-%m-%d')
+            if start.month >= 10:
+                season = f"{start.year}-{str(start.year + 1)[-2:]}"
+            else:
+                season = f"{start.year - 1}-{str(start.year)[-2:]}"
+        print(f"Season detected: {season}")
+
+        # --- 2️⃣ Prepare save paths ---
+        data_dir = Path(Config.DATA_DIR)
+        player_dir = data_dir / "player_game_logs"
+        player_dir.mkdir(parents=True, exist_ok=True)
+
+        master_file = data_dir / f"game_results_{season}.csv"
+        print(f"Data will be saved under: {data_dir.resolve()}")
+
+        all_stats = []
+
+        # --- 3️⃣ Loop through players ---
+        for i, player in enumerate(players_list, 1):
+            print(f"\n[{i}/{len(players_list)}] Fetching stats for {player}")
+
+            try:
+                stats = self.get_player_game_stats(player, season)
+            except Exception as e:
+                print(f"    ❌ Error fetching {player}: {e}")
+                continue
+
+            if not stats.empty:
+                stats['PLAYER_NAME'] = player
+                stats['GAME_DATE'] = pd.to_datetime(stats['GAME_DATE']).dt.strftime('%Y-%m-%d')
+
+                # --- 4️⃣ Save this player's data immediately ---
+                player_file = player_dir / f"{player.replace(' ', '_')}_{season}.csv"
+                stats.to_csv(player_file, index=False)
+                print(f"    💾 Saved {len(stats)} games for {player} → {player_file.name}")
+
+                # --- 5️⃣ Append to master file incrementally ---
+                if master_file.exists():
+                    existing = pd.read_csv(master_file)
+                    combined = pd.concat([existing, stats], ignore_index=True)
+                else:
+                    combined = stats.copy()
+
+                combined.to_csv(master_file, index=False)
+                print(f"    📈 Master file updated ({len(combined)} total rows).")
+
+                all_stats.append(stats)
+
+            else:
+                print(f"    ⚠️ No data for {player}")
+
+            time.sleep(1.2)  # Prevent hitting rate limits
+
+        # --- 6️⃣ Combine everything in memory (optional return) ---
+        if all_stats:
+            full_df = pd.concat(all_stats, ignore_index=True)
+            print(f"\n✓ Completed {len(players_list)} players total")
+            print(f"✓ Master file saved at {master_file}")
+            return full_df
+
+        print("\n⚠️ No data fetched for this date range.")
+        return pd.DataFrame()
+    
+    
+    def get_team_injuries_on_date(self, team_code, game_date):
+        """
+        Get list of injured players for a team on a specific date.
         
         Args:
-            start_date: Start date
-            end_date: End date
-            players_list: List of player names to fetch
+            team_code: Team code (e.g., 'LAL', 'GSW')
+            game_date: Date as string 'YYYY-MM-DD' or datetime
         
         Returns:
-            DataFrame with all game results
+            List of injured player names
         """
-        print(f"\n{'='*60}")
-        print(f"Fetching NBA Game Results")
-        print(f"{'='*60}")
+        if self.injury_df is None:
+            return []
         
-        # Determine season from date
-        start = datetime.strptime(start_date[:10], '%Y-%m-%d')
-        if start.month >= 10:
-            season = f"{start.year}-{str(start.year + 1)[-2:]}"
-        else:
-            season = f"{start.year - 1}-{str(start.year)[-2:]}"
+        # Convert game_date to datetime
+        if isinstance(game_date, str):
+            game_date = pd.to_datetime(game_date)
         
-        print(f"Season: {season}")
-        print(f"Fetching stats for {len(players_list)} unique players...")
+        # Filter for this team and date
+        # Note: You'll need to match team codes properly
+        # This is simplified - adjust based on your CSV format
         
-        all_stats = []
-        for i, player in enumerate(players_list, 1):
-            print(f"[{i}/{len(players_list)}] {player}")
-            stats = self.get_player_game_stats(player, season)
-            if not stats.empty:
-                all_stats.append(stats)
+        team_injuries = self.injury_df[
+            (self.injury_df['Date'] <= game_date)
+        ]
         
-        if all_stats:
-            combined = pd.concat(all_stats, ignore_index=True)
+        # Extract player names
+        # Adjust this based on your CSV column names
+        if 'Relinquished' in team_injuries.columns:
+            # Parse player name from "Player Name (TEAM)" format
+            injured_players = []
+            for _, row in team_injuries.iterrows():
+                player_str = row['Relinquished']
+                if isinstance(player_str, str) and team_code in player_str:
+                    # Extract name before parentheses
+                    player_name = player_str.split('(')[0].strip()
+                    injured_players.append(player_name)
             
-            # Convert game date to match odds format
-            combined['GAME_DATE'] = pd.to_datetime(combined['GAME_DATE']).dt.strftime('%Y-%m-%d')
-            
-            output_file = Config.DATA_DIR / f"game_results_{season}.csv"
-            combined.to_csv(output_file, index=False)
-            print(f"\n✓ Saved {len(combined)} game results to {output_file}")
-            return combined
+            return list(set(injured_players))  # Remove duplicates
         
-        return pd.DataFrame()
+        return []
