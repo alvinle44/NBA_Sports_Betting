@@ -127,3 +127,7 @@ Playoff windows are defined in `Config.PLAYOFF_DATE_RANGES` in `scripts/config.p
 - All data is stored locally as CSV/JSON — no database required
 - `nba_api` is rate-limited; game log collection may take a few minutes on first run
 - The free Odds API tier is sufficient for daily use on a normal slate. Running the dashboard multiple times a day will consume quota faster
+
+## Demo Video
+
+[Watch Demo](./sportsBetting.mp4)
