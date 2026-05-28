@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/cd3cfb5c-22ec-42ce-9002-1ea5a2e526b0
+
 # NBA Player Prop Betting Model
 
 A machine learning system for predicting NBA player prop outcomes, managing a betting bankroll, and detecting value in sportsbook lines.
@@ -130,4 +134,6 @@ Playoff windows are defined in `Config.PLAYOFF_DATE_RANGES` in `scripts/config.p
 
 ## Demo Video
 
-[Watch Demo](./sportsBetting.mp4)
+https://github.com/user-attachments/assets/bc682509-703e-4d0c-b7e5-1047ae744963
+
+
