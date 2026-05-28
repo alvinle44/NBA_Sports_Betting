@@ -1,7 +1,4 @@
 
-
-https://github.com/user-attachments/assets/cd3cfb5c-22ec-42ce-9002-1ea5a2e526b0
-
 # NBA Player Prop Betting Model
 
 A machine learning system for predicting NBA player prop outcomes, managing a betting bankroll, and detecting value in sportsbook lines.
