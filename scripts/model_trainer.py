@@ -6,55 +6,34 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.impute import SimpleImputer
+from xgboost import XGBRegressor
 
 from scripts.config import Config
 
 
-try:
-    from xgboost import XGBRegressor
-    XGBOOST_AVAILABLE = True
-except Exception:
-    XGBRegressor = None
-    XGBOOST_AVAILABLE = False
-
-
 class ModelTrainer:
-    def __init__(self, use_xgboost=True):
+    def __init__(self):
         self.models = {}
         self.metrics = {}
         self.feature_sets = {}
-        self.use_xgboost = use_xgboost and XGBOOST_AVAILABLE
-
-        if not self.use_xgboost:
-            print("XGBoost unavailable. Using sklearn HistGradientBoostingRegressor.")
 
     def _make_model(self):
-        if self.use_xgboost:
-            return XGBRegressor(
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=5,
-                min_child_weight=3,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                gamma=0.1,
-                random_state=42,
-                objective="reg:squarederror",
-                n_jobs=-1,
-            )
-
-        return HistGradientBoostingRegressor(
-            max_iter=300,
+        return XGBRegressor(
+            n_estimators=300,
             learning_rate=0.05,
-            max_leaf_nodes=31,
-            l2_regularization=0.1,
+            max_depth=5,
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            gamma=0.1,
             random_state=42,
+            objective="reg:squarederror",
+            n_jobs=-1,
         )
 
     def _clean_training_data(self, df):
@@ -238,7 +217,7 @@ class ModelTrainer:
             "residual_std": residual_std,
             "feature_importance": importance_df.to_dict("records") if importance_df is not None else [],
             "trained_date": datetime.now().strftime("%Y-%m-%d"),
-            "model_type": "xgboost" if self.use_xgboost else "sklearn_hist_gradient_boosting",
+            "model_type": "xgboost",
         }
 
         self.models[market] = model_info
@@ -367,12 +346,6 @@ def main():
         help="Print feature importance comparison"
     )
 
-    parser.add_argument(
-        "--no-xgboost",
-        action="store_true",
-        help="Use sklearn model instead of XGBoost"
-    )
-
     args = parser.parse_args()
 
     data_file = Path(args.data_file)
@@ -383,9 +356,7 @@ def main():
         print("python3 -m scripts.data_preparation")
         return
 
-    trainer = ModelTrainer(
-        use_xgboost=not args.no_xgboost
-    )
+    trainer = ModelTrainer()
 
     trainer.train_all_models(data_file)
 

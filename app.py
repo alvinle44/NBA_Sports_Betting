@@ -358,38 +358,60 @@ def page_predictions():
 # ── page: Select Bets ─────────────────────────────────────────────────────────
 
 def page_select_bets():
-    st.header("Select Bets to Track")
+    st.header("Select Bets & Build Parlays")
+    _playoff_warning()
 
     sel_date = st.date_input("Prediction date", value=date.today())
     df = load_predictions(sel_date)
 
     if df.empty:
-        st.info("No predictions for this date.")
+        st.info("No predictions for this date. Run predictions first.")
         return
 
-    pos_ev = df[pd.to_numeric(df.get("expected_value", pd.Series(dtype=float)), errors="coerce") > 0].copy()
-    if pos_ev.empty:
-        st.info("No positive-EV bets in today's predictions.")
-        pos_ev = df.copy()
+    # ── filters ───────────────────────────────────────────────────────────────
+    with st.expander("Filters", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            only_pos_ev = st.checkbox("Positive EV only", value=True)
+            markets = ["All"] + sorted(df["market"].dropna().unique().tolist())
+            sel_market = st.selectbox("Market", markets, key="sb_market")
+        with col2:
+            min_conf = st.slider("Min confidence (%)", 50, 90, 55, key="sb_conf")
+            direction = st.selectbox("Direction", ["All", "OVER", "UNDER"], key="sb_dir")
+        with col3:
+            books = ["All"] + sorted(df["bookmaker"].dropna().unique().tolist())
+            sel_book = st.selectbox("Bookmaker", books, key="sb_book")
+            sort_col = st.selectbox("Sort by", ["expected_value", "confidence", "edge_vs_line"], key="sb_sort")
+
+    filt = df.copy()
+    if only_pos_ev:
+        filt = filt[pd.to_numeric(filt.get("expected_value", pd.Series(dtype=float)), errors="coerce") > 0]
+    if sel_market != "All":
+        filt = filt[filt["market"] == sel_market]
+    if sel_book != "All":
+        filt = filt[filt["bookmaker"] == sel_book]
+    if "confidence" in filt.columns:
+        filt = filt[pd.to_numeric(filt["confidence"], errors="coerce").fillna(0) >= min_conf]
+    if direction != "All" and "bet_direction" in filt.columns:
+        filt = filt[filt["bet_direction"] == direction]
+    if sort_col in filt.columns:
+        filt = filt.sort_values(sort_col, ascending=False)
 
     display_cols = [c for c in [
         "player_name", "market", "line", "predicted_value", "edge_vs_line",
         "bet_direction", "confidence", "expected_value", "odds",
-        "kelly_percent", "units", "rec_units", "kelly_bet_size",
-        "bookmaker", "recommendation",
-    ] if c in pos_ev.columns]
+        "rec_units", "kelly_bet_size", "bookmaker",
+    ] if c in filt.columns]
 
-    st.subheader("Positive-EV Bets")
-    st.caption("Select rows to add to your bet tracker.")
+    st.caption(f"{len(filt)} props shown — check rows to select, then add as singles or build a parlay below")
 
-    # Use st.data_editor with a checkbox column for row selection
-    pos_ev_display = pos_ev[display_cols].copy().reset_index(drop=True)
-    pos_ev_display.insert(0, "Select", False)
+    filt_display = filt[display_cols].copy().reset_index(drop=True)
+    filt_display.insert(0, "Select", False)
 
     edited = st.data_editor(
-        pos_ev_display,
+        filt_display,
         column_config={"Select": st.column_config.CheckboxColumn("Select", default=False)},
-        disabled=[c for c in pos_ev_display.columns if c != "Select"],
+        disabled=[c for c in filt_display.columns if c != "Select"],
         use_container_width=True,
         hide_index=True,
         key="bet_selector",
@@ -401,69 +423,149 @@ def page_select_bets():
         st.info("Check rows above to select bets.")
         return
 
-    st.subheader(f"Configure {len(selected_indices)} selected bet(s)")
-    bankroll_data = load_bankroll()
-    current_bankroll = bankroll_data["current"]
+    selected_rows = filt.iloc[selected_indices].reset_index(drop=True)
 
-    bet_configs = []
-    for idx in selected_indices:
-        row = pos_ev.iloc[idx]
-        with st.expander(
-            f"{row.get('player_name','?')} — {row.get('market','?')} — "
-            f"{row.get('bet_direction','?')} {row.get('line','?')}",
-            expanded=True,
-        ):
-            c1, c2, c3 = st.columns(3)
+    st.divider()
+    tab_single, tab_parlay = st.tabs([
+        f"Add as {len(selected_indices)} Single Bet(s)",
+        f"Build Parlay from {len(selected_indices)} Leg(s)",
+    ])
+
+    # ── tab: single bets ──────────────────────────────────────────────────────
+    with tab_single:
+        st.subheader(f"Configure {len(selected_indices)} bet(s)")
+        bet_configs = []
+        for i, row in selected_rows.iterrows():
+            with st.expander(
+                f"{row.get('player_name','?')} — {row.get('market','?')} "
+                f"{row.get('bet_direction','?')} {row.get('line','?')}  "
+                f"@ {row.get('bookmaker','?')}",
+                expanded=True,
+            ):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    kelly = float(row.get("kelly_bet_size", 0) or 0)
+                    stake = st.number_input(
+                        "Stake ($)", min_value=1.0, value=max(float(kelly), 5.0),
+                        step=1.0, key=f"stake_{i}",
+                    )
+                with c2:
+                    default_odds = float(row.get("odds", -110) or -110)
+                    odds_taken = st.number_input(
+                        "Odds taken", value=default_odds, step=1.0, key=f"odds_{i}",
+                    )
+                with c3:
+                    notes = st.text_input("Notes", key=f"notes_{i}")
+                bet_configs.append({"row": row, "stake": stake, "odds": odds_taken, "notes": notes})
+
+        if st.button("Add Single Bets to Tracker", type="primary", key="add_singles"):
+            tracker = load_tracker()
+            today_str = sel_date.strftime("%Y-%m-%d")
+            new_rows = []
+            for bc in bet_configs:
+                r = bc["row"]
+                new_rows.append({
+                    "date": today_str,
+                    "bet_type": "model",
+                    "player_name": r.get("player_name", ""),
+                    "market": r.get("market", ""),
+                    "line": r.get("line", ""),
+                    "bet_direction": r.get("bet_direction", ""),
+                    "odds": bc["odds"],
+                    "stake": bc["stake"],
+                    "bookmaker": r.get("bookmaker", ""),
+                    "predicted_value": r.get("predicted_value", ""),
+                    "confidence": r.get("confidence", ""),
+                    "expected_value": r.get("expected_value", ""),
+                    "result_status": "pending",
+                    "actual_value": None,
+                    "profit_loss": None,
+                    "bankroll_after": None,
+                    "notes": bc["notes"],
+                })
+            tracker = pd.concat([tracker, pd.DataFrame(new_rows)], ignore_index=True)
+            save_tracker(tracker)
+            st.success(f"Added {len(new_rows)} bet(s) to tracker.")
+            st.rerun()
+
+    # ── tab: parlay builder ───────────────────────────────────────────────────
+    with tab_parlay:
+        st.subheader("Parlay from Selected Predictions")
+
+        legs = []
+        for i, row in selected_rows.iterrows():
+            direction = str(row.get("bet_direction", "OVER"))
+            auto_odds = float(row.get("odds", -110) or -110)
+            player = row.get("player_name", "?")
+            market = row.get("market", "?")
+            line = row.get("line", "?")
+            book = row.get("bookmaker", "")
+
+            c1, c2, c3 = st.columns([4, 2, 2])
             with c1:
-                kelly = float(row.get("kelly_bet_size", 0) or 0)
-                stake = st.number_input(
-                    "Stake ($)", min_value=1.0, value=max(float(kelly), 5.0),
-                    step=1.0, key=f"stake_{idx}",
+                st.markdown(
+                    f"**{player}** — {market} {direction} {line}"
+                    + (f"  @ {book}" if book else "")
                 )
             with c2:
-                default_odds = float(row.get("odds", -110) or -110)
-                odds_taken = st.number_input(
-                    "Odds taken", value=default_odds, step=1.0, key=f"odds_{idx}",
+                leg_odds = st.number_input(
+                    "Odds", value=auto_odds, step=1.0,
+                    key=f"parlay_odds_{i}", label_visibility="collapsed",
                 )
             with c3:
-                notes = st.text_input("Notes", key=f"notes_{idx}")
-            bet_configs.append({
-                "row": row,
-                "stake": stake,
-                "odds": odds_taken,
-                "notes": notes,
-            })
+                include = st.checkbox("Include", value=True, key=f"parlay_inc_{i}")
 
-    if st.button("Add Selected Bets to Tracker", type="primary"):
-        tracker = load_tracker()
-        today_str = sel_date.strftime("%Y-%m-%d")
-        new_rows = []
-        for bc in bet_configs:
-            r = bc["row"]
-            new_rows.append({
-                "date": today_str,
-                "player_name": r.get("player_name", ""),
-                "market": r.get("market", ""),
-                "line": r.get("line", ""),
-                "bet_direction": r.get("bet_direction", ""),
-                "odds": bc["odds"],
-                "stake": bc["stake"],
-                "bookmaker": r.get("bookmaker", ""),
-                "predicted_value": r.get("predicted_value", ""),
-                "confidence": r.get("confidence", ""),
-                "expected_value": r.get("expected_value", ""),
-                "result_status": "pending",
-                "actual_value": None,
-                "profit_loss": None,
-                "bankroll_after": None,
-                "notes": bc["notes"],
-            })
-        tracker = pd.concat(
-            [tracker, pd.DataFrame(new_rows)], ignore_index=True
-        )
-        save_tracker(tracker)
-        st.success(f"Added {len(new_rows)} bet(s) to tracker.")
-        st.rerun()
+            if include:
+                desc = f"{player} {market} {direction} {line}"
+                legs.append({"desc": desc, "odds": int(leg_odds), "book": book, "row": row})
+
+        if not legs:
+            st.info("No legs included — check the Include boxes above.")
+        else:
+            combo_odds = parlay_combined_odds([l["odds"] for l in legs])
+            all_books = ", ".join(set(l["book"] for l in legs if l["book"])) or "—"
+            legs_str = " | ".join(f"{l['desc']} ({l['odds']:+d})" for l in legs)
+
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Legs", len(legs))
+            m2.metric("Combined Odds", f"{combo_odds:+d}")
+
+            p_stake = st.number_input(
+                "Parlay stake ($)", min_value=1.0, value=10.0, step=1.0, key="parlay_stake"
+            )
+            to_win = calc_pnl(p_stake, float(combo_odds), True, False)
+            m3.metric("To Win", f"${to_win:.2f}")
+
+            p_notes = st.text_input("Notes", key="parlay_notes")
+            st.caption(f"Legs: {legs_str}")
+
+            if st.button("Add Parlay to Tracker", type="primary", key="add_parlay_from_preds"):
+                tracker = load_tracker()
+                new_row = {
+                    "date": sel_date.strftime("%Y-%m-%d"),
+                    "bet_type": "parlay",
+                    "player_name": f"{len(legs)}-leg parlay",
+                    "market": "parlay",
+                    "line": None,
+                    "bet_direction": "WIN",
+                    "odds": float(combo_odds),
+                    "stake": p_stake,
+                    "bookmaker": all_books,
+                    "predicted_value": None,
+                    "confidence": round(float(np.mean([float(l["row"].get("confidence", 50) or 50) for l in legs])), 1),
+                    "expected_value": None,
+                    "result_status": "pending",
+                    "actual_value": None,
+                    "profit_loss": None,
+                    "bankroll_after": None,
+                    "parlay_legs": legs_str,
+                    "notes": p_notes,
+                }
+                tracker = pd.concat([tracker, pd.DataFrame([new_row])], ignore_index=True)
+                save_tracker(tracker)
+                st.success(f"{len(legs)}-leg parlay added @ {combo_odds:+d} — to win ${to_win:.2f}")
+                st.rerun()
 
 
 # ── page: Manual Bet Entry ────────────────────────────────────────────────────

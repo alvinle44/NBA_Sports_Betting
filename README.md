@@ -38,8 +38,6 @@ Create a `.env` file in the repo root with your API key:
 ODDS_API_KEY=your_key_here
 ```
 
-The `.env` file is in `.gitignore` and will never be committed. Do not put your key anywhere else.
-
 ## Data Collection & Training
 
 **Complete these steps in order before using the dashboard.**
